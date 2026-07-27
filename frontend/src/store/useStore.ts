@@ -96,7 +96,7 @@ function saveHistoryToStorage(history: HistoryItem[]) {
 }
 
 export const useStore = create<AppState>((set, get) => ({
-  apiBaseUrl: 'https://ministry-large-mailed-reliance.trycloudflare.com',
+  apiBaseUrl: (import.meta.env.VITE_API_BASE_URL as string) || 'https://ecommerce-api.onrender.com',
   isConnected: false,
   responseTime: 0,
   agents: [],
