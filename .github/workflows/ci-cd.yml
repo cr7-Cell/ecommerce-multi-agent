@@ -1,0 +1,200 @@
+# ============================================================
+# 跨境电商多智能体系统 - CI/CD 流水线
+# ============================================================
+# 触发条件:
+#   - push: main/master 分支
+#   - pull_request: main/master 分支
+#
+# 流程:
+#   1. 代码检查 (lint)
+#   2. 单元测试 (test)
+#   3. Demo 验证 (demo)
+#   4. Docker 构建 (build)
+#   5. 部署 (deploy) — 仅 main 分支
+# ============================================================
+
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+env:
+  PYTHON_VERSION: "3.11"
+  DOCKER_IMAGE: ecommerce-multi-agent
+
+jobs:
+  # ============================================================
+  # Job 1: 代码检查
+  # ============================================================
+  lint:
+    name: 代码检查
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 设置 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: 安装依赖
+        run: |
+          pip install --upgrade pip
+          pip install ruff
+
+      - name: 代码风格检查
+        run: ruff check . --select=E,F,W --ignore=E501
+
+      - name: 导入排序检查
+        run: ruff check . --select=I
+
+  # ============================================================
+  # Job 2: 单元测试
+  # ============================================================
+  test:
+    name: 单元测试
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 设置 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: 安装依赖
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest pytest-asyncio pytest-cov
+
+      - name: 运行测试
+        run: |
+          pytest tests/ --cov=core --cov-report=xml --cov-report=term -v
+
+      - name: 上传覆盖率报告
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage.xml
+
+  # ============================================================
+  # Job 3: Demo 验证
+  # ============================================================
+  demo:
+    name: Demo 验证
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 设置 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: 安装依赖
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: LangGraph StateGraph Demo
+        run: python demo/langgraph_state_demo.py
+
+      - name: MCP工具调用Demo
+        run: python demo/mcp_tool_call_demo.py
+
+  # ============================================================
+  # Job 4: Docker 构建
+  # ============================================================
+  build:
+    name: Docker 构建
+    runs-on: ubuntu-latest
+    needs: [test, demo]
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 设置 Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: 构建 Docker 镜像
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: false
+          tags: ${{ env.DOCKER_IMAGE }}:${{ github.sha }},${{ env.DOCKER_IMAGE }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: 镜像扫描（Trivy）
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.DOCKER_IMAGE }}:latest
+          format: table
+          exit-code: 0
+          severity: HIGH,CRITICAL
+
+  # ============================================================
+  # Job 5: 部署（仅 main 分支）
+  # ============================================================
+  deploy:
+    name: 部署
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+    environment: production
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 登录 Docker Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ secrets.DOCKER_REGISTRY }}
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: 构建并推送镜像
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ secrets.DOCKER_REGISTRY }}/${{ env.DOCKER_IMAGE }}:${{ github.sha }}
+            ${{ secrets.DOCKER_REGISTRY }}/${{ env.DOCKER_IMAGE }}:latest
+
+      - name: 部署到服务器
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          script: |
+            cd /opt/ecommerce-multi-agent
+            docker-compose pull api
+            docker-compose up -d --force-recreate api
+            docker image prune -f
+
+      - name: 部署后健康检查
+        run: |
+          sleep 5
+          for i in {1..10}; do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://${{ secrets.DEPLOY_HOST }}:7000/health || echo "000")
+            if [ "$STATUS" = "200" ]; then
+              echo "健康检查通过 (HTTP $STATUS)"
+              exit 0
+            fi
+            echo "等待服务就绪... (尝试 $i/10, HTTP $STATUS)"
+            sleep 3
+          done
+          echo "健康检查失败: 服务未在 30s 内就绪"
+          exit 1

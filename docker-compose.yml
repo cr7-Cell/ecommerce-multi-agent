@@ -1,0 +1,105 @@
+# ============================================================
+# 跨境电商多智能体系统 - Docker Compose 编排
+# ============================================================
+# 包含:
+#   - API 服务（多智能体系统）
+#   - PostgreSQL 数据库（可选，生产环境）
+#   - Redis 缓存（可选，会话管理）
+#
+# 启动:
+#   docker-compose up -d
+#
+# 停止:
+#   docker-compose down
+# ============================================================
+
+version: "3.8"
+
+services:
+  # ---- API 服务 ----
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ecommerce-multi-agent:latest
+    container_name: ecommerce-api
+    ports:
+      - "7000:7000"
+    environment:
+      # LLM 配置
+      - LLM_PROVIDER=${LLM_PROVIDER:-deepseek}
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
+      - DEEPSEEK_BASE_URL=${DEEPSEEK_BASE_URL:-https://api.deepseek.com}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - OPENAI_BASE_URL=${OPENAI_BASE_URL:-}
+      # 数据库配置
+      - DATABASE_URL=${DATABASE_URL:-sqlite+aiosqlite:///ecommerce.db}
+      # 日志级别
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    env_file:
+      - .env
+    volumes:
+      # 持久化 SQLite 数据库文件
+      - ./data:/app/data
+      # 日志目录
+      - ./logs:/app/logs
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:7000/health').raise_for_status()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    networks:
+      - agent-network
+
+  # ---- PostgreSQL 数据库（生产环境可选） ----
+  postgres:
+    image: postgres:16-alpine
+    container_name: ecommerce-db
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-ecommerce}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-ecommerce123}
+      - POSTGRES_DB=${POSTGRES_DB:-ecommerce}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./database/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-ecommerce} -d ${POSTGRES_DB:-ecommerce}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - agent-network
+    profiles:
+      - production  # 仅在生产环境启动
+
+  # ---- Redis 缓存（可选） ----
+  redis:
+    image: redis:7-alpine
+    container_name: ecommerce-cache
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - agent-network
+    profiles:
+      - production  # 仅在生产环境启动
+
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  agent-network:
+    driver: bridge
